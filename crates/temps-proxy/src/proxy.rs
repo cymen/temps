@@ -2667,15 +2667,21 @@ fn response_body_filter_inner(
     Ok(None)
 }
 
-/// Resolve the client IP for a session from the TCP peer, honoring
-/// `CF-Connecting-IP` only when the peer is a verified Cloudflare egress
-/// address (see `cloudflare_ips`). Returns `None` for non-inet peers (unix
+/// Resolve the client IP from the TCP peer. Loopback peers may forward the
+/// connection address in X-Forwarded-For or X-Real-IP (see `client_ip`).
+/// CF-Connecting-IP is honored only for verified Cloudflare egress addresses
+/// (see `cloudflare_ips`). Returns `None` for non-inet peers (unix
 /// sockets) so callers keep their own fallback.
 ///
 /// Using `as_inet()` (not string-splitting on `:`) keeps IPv6 peers intact —
 /// `[2001:db8::1]:443` must resolve to `2001:db8::1`, not a mangled prefix.
 fn resolve_session_client_ip(session: &PingoraSession) -> Option<String> {
     let peer = session.client_addr()?.as_inet()?.ip();
+    if let Some(client_ip) =
+        crate::client_ip::resolve_loopback_client_ip(peer, &session.req_header().headers)
+    {
+        return Some(client_ip.to_string());
+    }
     let cf_connecting_ip = session
         .req_header()
         .headers
