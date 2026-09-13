@@ -42,6 +42,18 @@ fn effective_forwarded_ip_trust(startup_enabled: bool, settings_enabled: bool) -
     startup_enabled || settings_enabled
 }
 
+/// `None` means the settings read failed. Keep the last known value until a
+/// successful read, so a transient database outage cannot change IP policy.
+/// Returns the new value only when it changed.
+fn apply_forwarded_ip_trust_refresh(
+    snapshot: &AtomicBool,
+    startup_enabled: bool,
+    settings_enabled: Option<bool>,
+) -> Option<bool> {
+    let enabled = effective_forwarded_ip_trust(startup_enabled, settings_enabled?);
+    (snapshot.swap(enabled, Ordering::Relaxed) != enabled).then_some(enabled)
+}
+
 fn start_forwarded_ip_trust_refresh(
     config_service: Arc<temps_config::ConfigService>,
     startup_enabled: bool,
@@ -49,21 +61,17 @@ fn start_forwarded_ip_trust_refresh(
     let effective = Arc::new(AtomicBool::new(startup_enabled));
     let snapshot = Arc::downgrade(&effective);
     security_refresh_runtime()?.spawn(async move {
-        loop {
-            let enabled = match config_service.get_settings().await {
-                Ok(settings) => effective_forwarded_ip_trust(
-                    startup_enabled,
-                    settings.trust_loopback_forwarded_ip(),
-                ),
+        while let Some(snapshot) = snapshot.upgrade() {
+            let settings_enabled = match config_service.get_settings().await {
+                Ok(settings) => Some(settings.trust_loopback_forwarded_ip()),
                 Err(error) => {
-                    tracing::warn!(%error, "Could not refresh forwarded-IP trust; using the safe startup default");
-                    startup_enabled
+                    tracing::warn!(%error, "Could not refresh forwarded-IP trust; retaining the last known value");
+                    None
                 }
             };
-            let Some(snapshot) = snapshot.upgrade() else {
-                break;
-            };
-            if snapshot.swap(enabled, Ordering::Relaxed) != enabled {
+            if let Some(enabled) =
+                apply_forwarded_ip_trust_refresh(&snapshot, startup_enabled, settings_enabled)
+            {
                 info!(enabled, "Updated loopback forwarded-IP trust from platform settings");
             }
             tokio::time::sleep(FORWARDED_IP_TRUST_REFRESH_INTERVAL).await;
@@ -844,6 +852,35 @@ mod preflight_bind_tests {
         assert!(effective_forwarded_ip_trust(false, true));
         assert!(effective_forwarded_ip_trust(true, false));
         assert!(effective_forwarded_ip_trust(true, true));
+    }
+
+    #[test]
+    fn failed_forwarded_ip_trust_refresh_keeps_last_known_admin_choice() {
+        let snapshot = AtomicBool::new(false);
+
+        assert_eq!(
+            apply_forwarded_ip_trust_refresh(&snapshot, false, Some(true)),
+            Some(true)
+        );
+        assert_eq!(
+            apply_forwarded_ip_trust_refresh(&snapshot, false, None),
+            None
+        );
+        assert!(snapshot.load(Ordering::Relaxed));
+
+        assert_eq!(
+            apply_forwarded_ip_trust_refresh(&snapshot, false, Some(false)),
+            Some(false)
+        );
+        assert!(!snapshot.load(Ordering::Relaxed));
+
+        let forced = AtomicBool::new(true);
+        assert_eq!(apply_forwarded_ip_trust_refresh(&forced, true, None), None);
+        assert_eq!(
+            apply_forwarded_ip_trust_refresh(&forced, true, Some(false)),
+            None
+        );
+        assert!(forced.load(Ordering::Relaxed));
     }
 
     #[test]
