@@ -120,7 +120,7 @@ pub struct ServeCommand {
 
     /// Trust X-Forwarded-For or X-Real-IP from a same-host reverse proxy.
     /// Enable only when that proxy overwrites or safely appends the client IP.
-    #[arg(long)]
+    #[arg(long, env = "TEMPS_TRUST_LOOPBACK_FORWARDED_IP")]
     pub trust_loopback_forwarded_ip: bool,
 
     /// Private/WireGuard IP address of this control plane node.
@@ -889,7 +889,7 @@ impl ServeCommand {
 #[cfg(test)]
 mod post_migration_tests {
     use super::*;
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
 
     #[derive(Parser)]
     struct TestServeArgs {
@@ -898,15 +898,7 @@ mod post_migration_tests {
     }
 
     #[test]
-    fn forwarded_ip_trust_requires_explicit_flag() {
-        let default = TestServeArgs::try_parse_from([
-            "temps",
-            "--database-url",
-            "postgres://localhost/temps",
-        ])
-        .unwrap();
-        assert!(!default.command.trust_loopback_forwarded_ip);
-
+    fn forwarded_ip_trust_accepts_flag_and_env_binding() {
         let enabled = TestServeArgs::try_parse_from([
             "temps",
             "--database-url",
@@ -915,6 +907,16 @@ mod post_migration_tests {
         ])
         .unwrap();
         assert!(enabled.command.trust_loopback_forwarded_ip);
+
+        let command = TestServeArgs::command();
+        let argument = command
+            .get_arguments()
+            .find(|arg| arg.get_long() == Some("trust-loopback-forwarded-ip"))
+            .unwrap();
+        assert_eq!(
+            argument.get_env().and_then(|name| name.to_str()),
+            Some("TEMPS_TRUST_LOOPBACK_FORWARDED_IP")
+        );
     }
 
     #[test]

@@ -182,7 +182,7 @@ pub struct ProxyCommand {
 
     /// Trust X-Forwarded-For or X-Real-IP from a same-host reverse proxy.
     /// Enable only when that proxy overwrites or safely appends the client IP.
-    #[arg(long)]
+    #[arg(long, env = "TEMPS_TRUST_LOOPBACK_FORWARDED_IP")]
     pub trust_loopback_forwarded_ip: bool,
 }
 
@@ -788,7 +788,7 @@ mod on_demand_callback_tests {
 #[cfg(test)]
 mod skew_tests {
     use super::{compare_versions, SkewStatus};
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
 
     #[derive(Parser)]
     struct TestProxyArgs {
@@ -797,15 +797,7 @@ mod skew_tests {
     }
 
     #[test]
-    fn forwarded_ip_trust_requires_explicit_flag() {
-        let default = TestProxyArgs::try_parse_from([
-            "temps",
-            "--database-url",
-            "postgres://localhost/temps",
-        ])
-        .unwrap();
-        assert!(!default.command.trust_loopback_forwarded_ip);
-
+    fn forwarded_ip_trust_accepts_flag_and_env_binding() {
         let enabled = TestProxyArgs::try_parse_from([
             "temps",
             "--database-url",
@@ -814,6 +806,16 @@ mod skew_tests {
         ])
         .unwrap();
         assert!(enabled.command.trust_loopback_forwarded_ip);
+
+        let command = TestProxyArgs::command();
+        let argument = command
+            .get_arguments()
+            .find(|arg| arg.get_long() == Some("trust-loopback-forwarded-ip"))
+            .unwrap();
+        assert_eq!(
+            argument.get_env().and_then(|name| name.to_str()),
+            Some("TEMPS_TRUST_LOOPBACK_FORWARDED_IP")
+        );
     }
 
     #[test]
