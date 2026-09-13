@@ -54,13 +54,38 @@ fn apply_forwarded_ip_trust_refresh(
     (snapshot.swap(enabled, Ordering::Relaxed) != enabled).then_some(enabled)
 }
 
+/// The initial IP policy must be known before Pingora accepts a request. A
+/// background refresh alone leaves a window where a persisted admin opt-in is
+/// ignored and loopback is used as the client IP for IP-based controls.
+async fn load_initial_forwarded_ip_trust(
+    config_service: &temps_config::ConfigService,
+    startup_enabled: bool,
+) -> Result<bool> {
+    let settings = config_service.get_settings().await.map_err(|error| {
+        anyhow::anyhow!("Cannot start proxy: failed to load forwarded-IP trust setting: {error}")
+    })?;
+    Ok(effective_forwarded_ip_trust(
+        startup_enabled,
+        settings.trust_loopback_forwarded_ip(),
+    ))
+}
+
 fn start_forwarded_ip_trust_refresh(
     config_service: Arc<temps_config::ConfigService>,
     startup_enabled: bool,
 ) -> Result<Arc<AtomicBool>> {
-    let effective = Arc::new(AtomicBool::new(startup_enabled));
+    let runtime = security_refresh_runtime()?;
+    let initial = runtime.block_on(load_initial_forwarded_ip_trust(
+        &config_service,
+        startup_enabled,
+    ))?;
+    info!(
+        enabled = initial,
+        "Loaded loopback forwarded-IP trust before proxy startup"
+    );
+    let effective = Arc::new(AtomicBool::new(initial));
     let snapshot = Arc::downgrade(&effective);
-    security_refresh_runtime()?.spawn(async move {
+    runtime.spawn(async move {
         while let Some(snapshot) = snapshot.upgrade() {
             let settings_enabled = match config_service.get_settings().await {
                 Ok(settings) => Some(settings.trust_loopback_forwarded_ip()),
@@ -848,6 +873,65 @@ pub fn create_proxy_service(
 #[cfg(test)]
 mod preflight_bind_tests {
     use super::*;
+    use chrono::Utc;
+    use sea_orm::{DatabaseBackend, DbErr, MockDatabase};
+    use temps_core::AppSettings;
+    use temps_entities::settings;
+
+    fn test_config() -> Arc<ServerConfig> {
+        Arc::new(
+            ServerConfig::new(
+                "127.0.0.1:3000".to_string(),
+                "postgresql://test".to_string(),
+                None,
+                Some("127.0.0.1:8000".to_string()),
+            )
+            .expect("create test server config"),
+        )
+    }
+
+    #[test]
+    fn initial_forwarded_ip_trust_loads_saved_admin_choice() {
+        let settings = AppSettings {
+            trust_loopback_forwarded_ip: Some(true),
+            ..AppSettings::default()
+        };
+        let row = settings::Model {
+            id: 1,
+            data: settings.to_json(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([[row]])
+            .into_connection();
+        let service = Arc::new(temps_config::ConfigService::new(
+            test_config(),
+            Arc::new(db),
+        ));
+
+        let snapshot = start_forwarded_ip_trust_refresh(service, false)
+            .expect("saved admin opt-in must apply at startup");
+        assert!(snapshot.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn initial_forwarded_ip_trust_fails_closed_on_settings_read_error() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_errors([DbErr::Custom("settings unavailable".to_string())])
+            .into_connection();
+        let service = Arc::new(temps_config::ConfigService::new(
+            test_config(),
+            Arc::new(db),
+        ));
+
+        let error = start_forwarded_ip_trust_refresh(service, false)
+            .expect_err("proxy must not accept traffic before IP policy is known");
+        assert!(error
+            .to_string()
+            .contains("failed to load forwarded-IP trust setting"));
+        assert!(error.to_string().contains("settings unavailable"));
+    }
 
     #[test]
     fn forwarded_ip_trust_combines_admin_setting_and_startup_override() {

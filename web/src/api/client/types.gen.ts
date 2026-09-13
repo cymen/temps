@@ -1571,7 +1571,9 @@ export type AppSettings = {
     tenant_resource_ceilings?: TenantResourceCeilings;
     /**
      * Allow the proxy to use forwarding headers from a loopback peer for
-     * client IP attribution. The CLI/env startup opt-in can force this on.
+     * client IP attribution. `None` means an older client did not send the
+     * field; the settings handler preserves the stored decision on PUT.
+     * The CLI/env startup opt-in can force this on independently.
      */
     trust_loopback_forwarded_ip?: boolean | null;
 };
