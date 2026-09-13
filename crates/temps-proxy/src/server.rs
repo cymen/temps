@@ -443,7 +443,8 @@ pub fn setup_proxy_server(
         challenge_service,
         cert_host_cache,
         proxy_config.disable_https_redirect,
-    );
+    )
+    .with_trust_loopback_forwarded_ip(proxy_config.trust_loopback_forwarded_ip);
     if let Some(gate) = admin_gate {
         lb = lb.with_admin_gate(gate);
     }
@@ -779,7 +780,8 @@ pub fn create_proxy_service(
         challenge_service,
         cert_host_cache,
         proxy_config.disable_https_redirect,
-    );
+    )
+    .with_trust_loopback_forwarded_ip(proxy_config.trust_loopback_forwarded_ip);
 
     Ok(lb)
 }

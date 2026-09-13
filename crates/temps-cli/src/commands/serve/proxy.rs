@@ -123,6 +123,7 @@ pub fn start_proxy_server(
     route_table: Arc<temps_proxy::CachedPeerTable>,
     config: Arc<ServerConfig>,
     disable_https_redirect: bool,
+    trust_loopback_forwarded_ip: bool,
     on_demand_manager: Option<Arc<OnDemandManager>>,
     admin_gate: Option<temps_core::admin_gate::AdminGateHandle>,
     retention_resolver: Arc<dyn temps_core::RetentionResolver>,
@@ -253,8 +254,15 @@ pub fn start_proxy_server(
         tls_address,
         preview_domain,
         disable_https_redirect,
+        trust_loopback_forwarded_ip,
         on_demand_cert_manager,
     };
+
+    if trust_loopback_forwarded_ip {
+        warn!(
+            "Trusting forwarded client IPs from loopback peers: the local reverse proxy must overwrite X-Forwarded-For and X-Real-IP or safely append its observed client IP to X-Forwarded-For"
+        );
+    }
 
     info!(
         "Starting proxy server with preview_domain: {:?}",

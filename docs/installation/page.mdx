@@ -396,6 +396,14 @@ sudo systemctl status temps
 
 If you're running behind nginx:
 
+Start the proxy with `temps serve --trust-loopback-forwarded-ip` (or
+`temps proxy --trust-loopback-forwarded-ip` in a split installation) to use
+the visitor IP for analytics and IP-based controls. Forwarded-IP trust is off
+by default. Enable it only when nginx connects to Temps over loopback and
+overwrites `X-Real-IP` and either overwrites `X-Forwarded-For` with
+`$remote_addr` or appends `$remote_addr` as the final entry, as below.
+Passing client-supplied headers through unchanged lets clients spoof their IP.
+
 ```nginx
 server {
     listen 80;

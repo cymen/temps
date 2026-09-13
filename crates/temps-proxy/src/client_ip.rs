@@ -3,19 +3,24 @@
 
 //! Forwarded client addresses from a reverse proxy on the same host.
 //!
-//! The local proxy must overwrite X-Forwarded-For with the connection address,
-//! or append that address after any client-supplied entries. Remote peers never
-//! gain trust by supplying headers. This matches the console's loopback trust
-//! boundary without treating private networks or arbitrary CDN headers as trusted.
+//! Forwarded headers are ignored by default. When explicitly enabled, the local
+//! proxy must overwrite X-Forwarded-For with the connection address, or append
+//! that address after any client-supplied entries. It must also overwrite
+//! X-Real-IP if that fallback is used. Remote peers never gain trust by
+//! supplying headers.
 
 use axum::http::HeaderMap;
 use std::net::IpAddr;
 
 /// Return a trusted loopback peer's forwarded address, or its own address when
-/// the header is missing/invalid. `None` leaves non-loopback peers to the
-/// existing CDN/direct-connection resolution path.
-pub(crate) fn resolve_loopback_client_ip(peer: IpAddr, headers: &HeaderMap) -> Option<IpAddr> {
-    if !peer.is_loopback() {
+/// the header is missing/invalid. `None` leaves disabled or non-loopback peers
+/// to the existing CDN/direct-connection resolution path.
+pub(crate) fn resolve_loopback_client_ip(
+    peer: IpAddr,
+    headers: &HeaderMap,
+    trust_loopback_forwarded_ip: bool,
+) -> Option<IpAddr> {
+    if !trust_loopback_forwarded_ip || !peer.is_loopback() {
         return None;
     }
 
@@ -50,7 +55,7 @@ mod tests {
                 value.parse().unwrap(),
             );
         }
-        resolve_loopback_client_ip(peer.parse().unwrap(), &headers)
+        resolve_loopback_client_ip(peer.parse().unwrap(), &headers, true)
     }
 
     #[test]
@@ -63,6 +68,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn forwarded_headers_are_ignored_until_explicitly_enabled() {
+        let peer = "127.0.0.1".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "198.51.100.23".parse().unwrap());
+        headers.insert("x-real-ip", "198.51.100.24".parse().unwrap());
+
+        assert_eq!(resolve_loopback_client_ip(peer, &headers, false), None);
+        assert_eq!(
+            resolve_loopback_client_ip(peer, &headers, true),
+            Some("198.51.100.23".parse().unwrap())
+        );
+
+        headers.remove("x-forwarded-for");
+        assert_eq!(resolve_loopback_client_ip(peer, &headers, false), None);
+        assert_eq!(
+            resolve_loopback_client_ip(peer, &headers, true),
+            Some("198.51.100.24".parse().unwrap())
+        );
     }
 
     #[test]
@@ -164,6 +190,6 @@ mod tests {
             "x-forwarded-for",
             axum::http::HeaderValue::from_bytes(&[0xff]).unwrap(),
         );
-        assert_eq!(resolve_loopback_client_ip(peer, &headers), Some(peer));
+        assert_eq!(resolve_loopback_client_ip(peer, &headers, true), Some(peer));
     }
 }

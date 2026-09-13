@@ -179,6 +179,11 @@ pub struct ProxyCommand {
     /// Disable HTTP-to-HTTPS redirect (useful for local development without TLS)
     #[arg(long, env = "TEMPS_DISABLE_HTTPS_REDIRECT")]
     pub disable_https_redirect: bool,
+
+    /// Trust X-Forwarded-For or X-Real-IP from a same-host reverse proxy.
+    /// Enable only when that proxy overwrites or safely appends the client IP.
+    #[arg(long)]
+    pub trust_loopback_forwarded_ip: bool,
 }
 
 /// Builds the [`temps_core::ProjectIpGate`] a standalone proxy enforces with.
@@ -412,8 +417,14 @@ impl ProxyCommand {
             tls_address,
             preview_domain,
             disable_https_redirect: self.disable_https_redirect,
+            trust_loopback_forwarded_ip: self.trust_loopback_forwarded_ip,
             on_demand_cert_manager,
         };
+        if self.trust_loopback_forwarded_ip {
+            warn!(
+                "Trusting forwarded client IPs from loopback peers: the local reverse proxy must overwrite X-Forwarded-For and X-Real-IP or safely append its observed client IP to X-Forwarded-For"
+            );
+        }
         let listener = Arc::new(temps_routes::RouteTableListener::new(
             route_table.clone(),
             self.database_url.clone(),
@@ -777,6 +788,33 @@ mod on_demand_callback_tests {
 #[cfg(test)]
 mod skew_tests {
     use super::{compare_versions, SkewStatus};
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct TestProxyArgs {
+        #[command(flatten)]
+        command: super::ProxyCommand,
+    }
+
+    #[test]
+    fn forwarded_ip_trust_requires_explicit_flag() {
+        let default = TestProxyArgs::try_parse_from([
+            "temps",
+            "--database-url",
+            "postgres://localhost/temps",
+        ])
+        .unwrap();
+        assert!(!default.command.trust_loopback_forwarded_ip);
+
+        let enabled = TestProxyArgs::try_parse_from([
+            "temps",
+            "--database-url",
+            "postgres://localhost/temps",
+            "--trust-loopback-forwarded-ip",
+        ])
+        .unwrap();
+        assert!(enabled.command.trust_loopback_forwarded_ip);
+    }
 
     #[test]
     fn test_compare_versions_match() {

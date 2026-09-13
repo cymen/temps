@@ -12,6 +12,9 @@ pub struct ProxyConfig {
     /// When true, HTTP requests are served directly without redirecting to HTTPS.
     /// Useful for local development without TLS certificates.
     pub disable_https_redirect: bool,
+    /// Trust client IP headers from a loopback reverse proxy only when the
+    /// operator has explicitly enabled and configured that proxy.
+    pub trust_loopback_forwarded_ip: bool,
     /// On-demand HTTP-01 TLS certificate manager (ADR-018). `None` (default)
     /// disables on-demand issuance entirely — the proxy's TLS callback behaves
     /// exactly as before, returning `Ok(None)` with no side effect when no cert
@@ -29,7 +32,18 @@ impl Default for ProxyConfig {
             tls_address: None,
             preview_domain: Some("localhost".to_string()), // Default for local development
             disable_https_redirect: false,
+            trust_loopback_forwarded_ip: false,
             on_demand_cert_manager: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProxyConfig;
+
+    #[test]
+    fn forwarded_ip_trust_is_off_by_default() {
+        assert!(!ProxyConfig::default().trust_loopback_forwarded_ip);
     }
 }
