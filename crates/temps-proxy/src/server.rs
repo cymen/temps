@@ -74,6 +74,9 @@ fn start_forwarded_ip_trust_refresh(
             {
                 info!(enabled, "Updated loopback forwarded-IP trust from platform settings");
             }
+            // Release the task's strong reference before sleeping. If the
+            // LoadBalancer is dropped, the next weak upgrade ends this task.
+            drop(snapshot);
             tokio::time::sleep(FORWARDED_IP_TRUST_REFRESH_INTERVAL).await;
         }
     });
