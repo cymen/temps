@@ -61,6 +61,12 @@ async fn load_initial_forwarded_ip_trust(
     config_service: &temps_config::ConfigService,
     startup_enabled: bool,
 ) -> Result<bool> {
+    // An explicit startup override already determines the effective policy.
+    // Do not make a settings read an availability dependency in that case.
+    if startup_enabled {
+        return Ok(true);
+    }
+
     let settings = config_service.get_settings().await.map_err(|error| {
         anyhow::anyhow!("Cannot start proxy: failed to load forwarded-IP trust setting: {error}")
     })?;
@@ -931,6 +937,21 @@ mod preflight_bind_tests {
             .to_string()
             .contains("failed to load forwarded-IP trust setting"));
         assert!(error.to_string().contains("settings unavailable"));
+    }
+
+    #[test]
+    fn startup_override_does_not_depend_on_settings_read() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_errors([DbErr::Custom("settings unavailable".to_string())])
+            .into_connection();
+        let service = Arc::new(temps_config::ConfigService::new(
+            test_config(),
+            Arc::new(db),
+        ));
+
+        let snapshot = start_forwarded_ip_trust_refresh(service, true)
+            .expect("explicit override determines policy without a settings read");
+        assert!(snapshot.load(Ordering::Relaxed));
     }
 
     #[test]

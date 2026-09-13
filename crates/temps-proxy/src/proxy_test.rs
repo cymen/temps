@@ -38,11 +38,8 @@ pub mod proxy_tests {
 
     /// Simple mock server that just accepts connections
     async fn start_simple_server() -> String {
-        let port = get_next_port();
-        let addr = format!("127.0.0.1:{}", port);
-
-        let listener = TcpListener::bind(&addr).await.unwrap();
-        let server_addr = addr.clone();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = listener.local_addr().unwrap().to_string();
 
         // Start a simple server that accepts and closes connections
         tokio::spawn(async move {
