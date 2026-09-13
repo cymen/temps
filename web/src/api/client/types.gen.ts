@@ -1569,6 +1569,11 @@ export type AppSettings = {
      * upgrade never changes what an existing config means.
      */
     tenant_resource_ceilings?: TenantResourceCeilings;
+    /**
+     * Allow the proxy to use forwarding headers from a loopback peer for
+     * client IP attribution. The CLI/env startup opt-in can force this on.
+     */
+    trust_loopback_forwarded_ip?: boolean | null;
 };
 
 /**
@@ -1712,6 +1717,11 @@ export type AppSettingsResponse = {
      * directly. Unenforced by default.
      */
     tenant_resource_ceilings: TenantResourceCeilings;
+    /**
+     * Database-backed opt-in. A proxy startup flag or environment variable
+     * may independently force this on for that proxy process.
+     */
+    trust_loopback_forwarded_ip: boolean;
 };
 
 export type ApplicationPreviewLinkResponse = {

@@ -63,6 +63,7 @@ use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_proxy::{FailToProxy, ProxyHttp, Session as PingoraSession};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use temps_core::static_files::{normalize_static_request_path, MAX_PUBLIC_STATIC_ASSET_BYTES};
@@ -833,7 +834,7 @@ pub struct LoadBalancer {
     /// Refreshed every 30 s by `CertHostCache::run_refresh_loop`. See WS3.
     cert_host_cache: Arc<CertHostCache>,
     disable_https_redirect: bool,
-    trust_loopback_forwarded_ip: bool,
+    trust_loopback_forwarded_ip: Arc<AtomicBool>,
     on_demand_manager: Option<Arc<OnDemandManager>>,
     /// On-demand HTTP-01 TLS cert manager (ADR-018). When set, the port-80
     /// `request_filter` reads its in-process state cache (NO DB hit) to serve a
@@ -914,7 +915,7 @@ impl LoadBalancer {
             challenge_service,
             cert_host_cache,
             disable_https_redirect,
-            trust_loopback_forwarded_ip: false,
+            trust_loopback_forwarded_ip: Arc::new(AtomicBool::new(false)),
             on_demand_manager: None,
             on_demand_cert_manager: None,
             route_table: None,
@@ -942,7 +943,7 @@ impl LoadBalancer {
     }
 
     /// Enable forwarded client IPs only for an explicitly configured local proxy.
-    pub fn with_trust_loopback_forwarded_ip(mut self, enabled: bool) -> Self {
+    pub fn with_trust_loopback_forwarded_ip(mut self, enabled: Arc<AtomicBool>) -> Self {
         self.trust_loopback_forwarded_ip = enabled;
         self
     }
@@ -3582,8 +3583,11 @@ impl ProxyHttp for LoadBalancer {
         ctx: &mut Self::CTX,
     ) -> Result<()> {
         // Extract client IP address FIRST (needed for TLS fingerprinting)
-        let client_ip = resolve_session_client_ip(session, self.trust_loopback_forwarded_ip)
-            .unwrap_or_else(|| "unknown".to_string());
+        let client_ip = resolve_session_client_ip(
+            session,
+            self.trust_loopback_forwarded_ip.load(Ordering::Relaxed),
+        )
+        .unwrap_or_else(|| "unknown".to_string());
         ctx.ip_address = Some(client_ip.clone());
 
         // Extract user-agent FIRST (needed for TLS fingerprinting)
@@ -3766,9 +3770,10 @@ impl ProxyHttp for LoadBalancer {
             .unwrap_or_default();
 
         // Extract client IP address early (needed for attack mode checks)
-        if let Some(client_ip) =
-            resolve_session_client_ip(session, self.trust_loopback_forwarded_ip)
-        {
+        if let Some(client_ip) = resolve_session_client_ip(
+            session,
+            self.trust_loopback_forwarded_ip.load(Ordering::Relaxed),
+        ) {
             ctx.ip_address = Some(client_ip);
         }
 

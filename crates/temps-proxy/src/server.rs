@@ -21,7 +21,9 @@ use pingora_openssl::ssl::NameType;
 use pingora_openssl::x509::X509;
 use pingora_proxy::ProxyServiceBuilder;
 use std::any::Any;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use temps_config::ServerConfig;
 use temps_core::plugin::{ServiceRegistrationContext, TempsPlugin};
 use temps_database::DbConnection;
@@ -31,6 +33,44 @@ use tracing::{debug, info};
 use async_trait::async_trait;
 use std::future::Future;
 use std::pin::Pin;
+
+/// The settings cache has a five-second TTL in proxy processes. Polling every
+/// two seconds bounds the delay after an admin save without querying on traffic.
+const FORWARDED_IP_TRUST_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+
+fn effective_forwarded_ip_trust(startup_enabled: bool, settings_enabled: bool) -> bool {
+    startup_enabled || settings_enabled
+}
+
+fn start_forwarded_ip_trust_refresh(
+    config_service: Arc<temps_config::ConfigService>,
+    startup_enabled: bool,
+) -> Result<Arc<AtomicBool>> {
+    let effective = Arc::new(AtomicBool::new(startup_enabled));
+    let snapshot = Arc::downgrade(&effective);
+    security_refresh_runtime()?.spawn(async move {
+        loop {
+            let enabled = match config_service.get_settings().await {
+                Ok(settings) => effective_forwarded_ip_trust(
+                    startup_enabled,
+                    settings.trust_loopback_forwarded_ip(),
+                ),
+                Err(error) => {
+                    tracing::warn!(%error, "Could not refresh forwarded-IP trust; using the safe startup default");
+                    startup_enabled
+                }
+            };
+            let Some(snapshot) = snapshot.upgrade() else {
+                break;
+            };
+            if snapshot.swap(enabled, Ordering::Relaxed) != enabled {
+                info!(enabled, "Updated loopback forwarded-IP trust from platform settings");
+            }
+            tokio::time::sleep(FORWARDED_IP_TRUST_REFRESH_INTERVAL).await;
+        }
+    });
+    Ok(effective)
+}
 
 /// TLS extension data stored in SslDigest via the new Pingora 0.8.0 SslDigestExtension.
 ///
@@ -430,6 +470,10 @@ pub fn setup_proxy_server(
     );
 
     // Create the main load balancer
+    let trust_loopback_forwarded_ip = start_forwarded_ip_trust_refresh(
+        config_service.clone(),
+        proxy_config.trust_loopback_forwarded_ip,
+    )?;
     let mut lb = LoadBalancer::new(
         upstream_resolver,
         proxy_log_handle,
@@ -444,7 +488,7 @@ pub fn setup_proxy_server(
         cert_host_cache,
         proxy_config.disable_https_redirect,
     )
-    .with_trust_loopback_forwarded_ip(proxy_config.trust_loopback_forwarded_ip);
+    .with_trust_loopback_forwarded_ip(trust_loopback_forwarded_ip);
     if let Some(gate) = admin_gate {
         lb = lb.with_admin_gate(gate);
     }
@@ -767,6 +811,10 @@ pub fn create_proxy_service(
         as Arc<dyn ProjectContextResolver>;
 
     // Create the main load balancer
+    let trust_loopback_forwarded_ip = start_forwarded_ip_trust_refresh(
+        config_service.clone(),
+        proxy_config.trust_loopback_forwarded_ip,
+    )?;
     let lb = LoadBalancer::new(
         upstream_resolver,
         proxy_log_handle,
@@ -781,7 +829,7 @@ pub fn create_proxy_service(
         cert_host_cache,
         proxy_config.disable_https_redirect,
     )
-    .with_trust_loopback_forwarded_ip(proxy_config.trust_loopback_forwarded_ip);
+    .with_trust_loopback_forwarded_ip(trust_loopback_forwarded_ip);
 
     Ok(lb)
 }
@@ -789,6 +837,14 @@ pub fn create_proxy_service(
 #[cfg(test)]
 mod preflight_bind_tests {
     use super::*;
+
+    #[test]
+    fn forwarded_ip_trust_combines_admin_setting_and_startup_override() {
+        assert!(!effective_forwarded_ip_trust(false, false));
+        assert!(effective_forwarded_ip_trust(false, true));
+        assert!(effective_forwarded_ip_trust(true, false));
+        assert!(effective_forwarded_ip_trust(true, true));
+    }
 
     #[test]
     fn check_address_bindable_succeeds_on_free_port() {

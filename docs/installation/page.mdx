@@ -396,10 +396,14 @@ sudo systemctl status temps
 
 If you're running behind nginx:
 
-Set `TEMPS_TRUST_LOOPBACK_FORWARDED_IP=true` when starting `temps serve` (or
-`temps proxy` in a split installation) to use the visitor IP for analytics
-and IP-based controls. The equivalent CLI flag is
-`--trust-loopback-forwarded-ip`. Forwarded-IP trust is off by default.
+An admin can enable **Settings → Security → Proxy client IP** to use the
+visitor IP for analytics and IP-based controls. The database-backed setting
+applies to both `temps serve` and standalone `temps proxy` processes within a
+few seconds. Alternatively, set `TEMPS_TRUST_LOOPBACK_FORWARDED_IP=true` or
+pass `--trust-loopback-forwarded-ip` when starting either process. A startup
+opt-in forces trust on for that process even if the admin setting is off;
+remove it and restart the proxy to let the admin setting turn trust off.
+Forwarded-IP trust is off by default.
 Enable it only when nginx connects to Temps over loopback and
 overwrites `X-Real-IP` and either overwrites `X-Forwarded-For` with
 `$remote_addr` or appends `$remote_addr` as the final entry, as below.

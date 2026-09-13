@@ -253,6 +253,9 @@ pub struct AppSettingsResponse {
     // Security settings
     pub security_headers: SecurityHeadersSettings,
     pub rate_limiting: RateLimitSettings,
+    /// Database-backed opt-in. A proxy startup flag or environment variable
+    /// may independently force this on for that proxy process.
+    pub trust_loopback_forwarded_ip: bool,
 
     // Docker registry settings with masked password
     pub docker_registry: DockerRegistrySettingsMasked,
@@ -484,6 +487,7 @@ impl From<AppSettings> for AppSettingsResponse {
         // Resolved before the literal below starts moving fields out of
         // `settings`; absence means "never configured", which reads as default.
         let self_update = settings.self_update();
+        let trust_loopback_forwarded_ip = settings.trust_loopback_forwarded_ip();
         Self {
             external_url: settings.external_url,
             internal_url: settings.internal_url,
@@ -509,6 +513,7 @@ impl From<AppSettings> for AppSettingsResponse {
             },
             security_headers: settings.security_headers,
             rate_limiting: settings.rate_limiting,
+            trust_loopback_forwarded_ip,
             docker_registry: DockerRegistrySettingsMasked {
                 enabled: settings.docker_registry.enabled,
                 registry_url: settings.docker_registry.registry_url,
@@ -1787,6 +1792,9 @@ fn preserve_self_recorded_fields(incoming: &mut AppSettings, current: &AppSettin
 fn preserve_omitted_security_fields(incoming: &mut AppSettings, current: &AppSettings) {
     if incoming.self_update.is_none() {
         incoming.self_update = current.self_update.clone();
+    }
+    if incoming.trust_loopback_forwarded_ip.is_none() {
+        incoming.trust_loopback_forwarded_ip = current.trust_loopback_forwarded_ip;
     }
 }
 
@@ -3305,6 +3313,37 @@ mod tests {
         assert!(settings.self_update.is_none());
         assert!(settings.self_update().enabled);
         assert_eq!(settings.self_update().channel, None);
+    }
+
+    #[test]
+    fn omitted_forwarded_ip_trust_preserves_admin_choice() {
+        let current = AppSettings {
+            trust_loopback_forwarded_ip: Some(true),
+            ..AppSettings::default()
+        };
+        let mut incoming: AppSettings = serde_json::from_value(serde_json::json!({}))
+            .expect("an older settings client omits the new field");
+
+        preserve_omitted_security_fields(&mut incoming, &current);
+
+        assert!(incoming.trust_loopback_forwarded_ip());
+    }
+
+    #[test]
+    fn explicit_forwarded_ip_trust_false_disables_admin_choice() {
+        let current = AppSettings {
+            trust_loopback_forwarded_ip: Some(true),
+            ..AppSettings::default()
+        };
+        let mut incoming = AppSettings {
+            trust_loopback_forwarded_ip: Some(false),
+            ..AppSettings::default()
+        };
+
+        preserve_omitted_security_fields(&mut incoming, &current);
+
+        assert!(!incoming.trust_loopback_forwarded_ip());
+        assert!(!AppSettingsResponse::from(incoming).trust_loopback_forwarded_ip);
     }
 
     #[test]
