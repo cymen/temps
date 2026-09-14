@@ -12,6 +12,21 @@
 use axum::http::HeaderMap;
 use std::net::IpAddr;
 
+/// Whether `peer` is a loopback address, treating an IPv4-mapped IPv6 address
+/// (`::ffff:127.0.0.1`) as loopback too. A dual-stack listener without
+/// `IPV6_V6ONLY` commonly hands a same-host IPv4 connection to Rust as this
+/// mapped form; without unwrapping it, `Ipv6Addr::is_loopback` reports `false`
+/// (it only recognizes `::1`), silently leaving the feature inert even when
+/// correctly enabled and configured.
+fn peer_is_loopback(peer: IpAddr) -> bool {
+    match peer {
+        IpAddr::V4(v4) => v4.is_loopback(),
+        IpAddr::V6(v6) => {
+            v6.is_loopback() || v6.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())
+        }
+    }
+}
+
 /// Return a trusted loopback peer's forwarded address, or its own address when
 /// the header is missing/invalid. `None` leaves disabled or non-loopback peers
 /// to the existing CDN/direct-connection resolution path.
@@ -20,7 +35,7 @@ pub(crate) fn resolve_loopback_client_ip(
     headers: &HeaderMap,
     trust_loopback_forwarded_ip: bool,
 ) -> Option<IpAddr> {
-    if !trust_loopback_forwarded_ip || !peer.is_loopback() {
+    if !trust_loopback_forwarded_ip || !peer_is_loopback(peer) {
         return None;
     }
 
@@ -68,6 +83,25 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn loopback_detects_ipv4_mapped_ipv6_peer() {
+        // A dual-stack listener without IPV6_V6ONLY can hand a same-host IPv4
+        // connection to Rust as `::ffff:127.0.0.1`; this must still count as
+        // loopback so the feature isn't silently inert on that configuration.
+        assert_eq!(
+            resolve("::ffff:127.0.0.1", &[("x-forwarded-for", "198.51.100.23")]),
+            Some("198.51.100.23".parse().unwrap())
+        );
+        assert_eq!(
+            resolve(
+                "::ffff:203.0.113.5",
+                &[("x-forwarded-for", "198.51.100.23")]
+            ),
+            None,
+            "a non-loopback IPv4-mapped address must not be trusted"
+        );
     }
 
     #[test]
