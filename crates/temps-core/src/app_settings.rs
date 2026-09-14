@@ -66,7 +66,7 @@ pub struct AppSettings {
     /// Allow the proxy to use forwarding headers from a loopback peer for
     /// client IP attribution. `None` means an older client did not send the
     /// field; the settings handler preserves the stored decision on PUT.
-    /// The CLI/env startup opt-in can force this on independently.
+    /// This is the sole control surface — there is no CLI/env override.
     #[serde(default)]
     pub trust_loopback_forwarded_ip: Option<bool>,
 

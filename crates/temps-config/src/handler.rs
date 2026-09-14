@@ -286,8 +286,8 @@ pub struct AppSettingsResponse {
     // Security settings
     pub security_headers: SecurityHeadersSettings,
     pub rate_limiting: RateLimitSettings,
-    /// Database-backed opt-in. A proxy startup flag or environment variable
-    /// may independently force this on for that proxy process.
+    /// Database-backed opt-in; this is the sole control surface for every
+    /// proxy process, including a standalone `temps proxy`.
     pub trust_loopback_forwarded_ip: bool,
 
     // Docker registry settings with masked password
