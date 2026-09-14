@@ -170,12 +170,6 @@ export function SecurityPage() {
               analytics and IP-based controls. Changes reach proxy processes
               within a few seconds.
             </p>
-            <p className="text-sm text-muted-foreground">
-              TEMPS_TRUST_LOOPBACK_FORWARDED_IP=true or
-              --trust-loopback-forwarded-ip forces this on for that proxy
-              process. Remove the startup override and restart it to let this
-              setting turn trust off.
-            </p>
           </div>
         </SettingsSection>
         <SecuritySettings

@@ -38,19 +38,14 @@ use std::pin::Pin;
 /// two seconds bounds the delay after an admin save without querying on traffic.
 const FORWARDED_IP_TRUST_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
-fn effective_forwarded_ip_trust(startup_enabled: bool, settings_enabled: bool) -> bool {
-    startup_enabled || settings_enabled
-}
-
 /// `None` means the settings read failed. Keep the last known value until a
 /// successful read, so a transient database outage cannot change IP policy.
 /// Returns the new value only when it changed.
 fn apply_forwarded_ip_trust_refresh(
     snapshot: &AtomicBool,
-    startup_enabled: bool,
     settings_enabled: Option<bool>,
 ) -> Option<bool> {
-    let enabled = effective_forwarded_ip_trust(startup_enabled, settings_enabled?);
+    let enabled = settings_enabled?;
     (snapshot.swap(enabled, Ordering::Relaxed) != enabled).then_some(enabled)
 }
 
@@ -59,32 +54,24 @@ fn apply_forwarded_ip_trust_refresh(
 /// ignored and loopback is used as the client IP for IP-based controls.
 async fn load_initial_forwarded_ip_trust(
     config_service: &temps_config::ConfigService,
-    startup_enabled: bool,
 ) -> Result<bool> {
-    // An explicit startup override already determines the effective policy.
-    // Do not make a settings read an availability dependency in that case.
-    if startup_enabled {
-        return Ok(true);
-    }
-
     let settings = config_service.get_settings().await.map_err(|error| {
         anyhow::anyhow!("Cannot start proxy: failed to load forwarded-IP trust setting: {error}")
     })?;
-    Ok(effective_forwarded_ip_trust(
-        startup_enabled,
-        settings.trust_loopback_forwarded_ip(),
-    ))
+    Ok(settings.trust_loopback_forwarded_ip())
 }
 
 fn start_forwarded_ip_trust_refresh(
     config_service: Arc<temps_config::ConfigService>,
-    startup_enabled: bool,
 ) -> Result<Arc<AtomicBool>> {
     let runtime = security_refresh_runtime()?;
-    let initial = runtime.block_on(load_initial_forwarded_ip_trust(
-        &config_service,
-        startup_enabled,
-    ))?;
+    // `block_on` on `security_refresh_runtime` from within `create_proxy_service`'s
+    // own caller runtime is a second nested `block_on` alongside the one
+    // `AdminGateService::new` already does at that call site. Both are safe today
+    // (the outer runtime is only driving synchronous setup at this point), but this
+    // adds to the same "runtime nesting" issue `integration_test.rs` is `#[ignore]`d
+    // for — worth knowing before attempting to un-ignore those tests.
+    let initial = runtime.block_on(load_initial_forwarded_ip_trust(&config_service))?;
     info!(
         enabled = initial,
         "Loaded loopback forwarded-IP trust before proxy startup"
@@ -100,9 +87,7 @@ fn start_forwarded_ip_trust_refresh(
                     None
                 }
             };
-            if let Some(enabled) =
-                apply_forwarded_ip_trust_refresh(&snapshot, startup_enabled, settings_enabled)
-            {
+            if let Some(enabled) = apply_forwarded_ip_trust_refresh(&snapshot, settings_enabled) {
                 info!(enabled, "Updated loopback forwarded-IP trust from platform settings");
             }
             // Release the task's strong reference before sleeping. If the
@@ -512,10 +497,7 @@ pub fn setup_proxy_server(
     );
 
     // Create the main load balancer
-    let trust_loopback_forwarded_ip = start_forwarded_ip_trust_refresh(
-        config_service.clone(),
-        proxy_config.trust_loopback_forwarded_ip,
-    )?;
+    let trust_loopback_forwarded_ip = start_forwarded_ip_trust_refresh(config_service.clone())?;
     let mut lb = LoadBalancer::new(
         upstream_resolver,
         proxy_log_handle,
@@ -853,10 +835,7 @@ pub fn create_proxy_service(
         as Arc<dyn ProjectContextResolver>;
 
     // Create the main load balancer
-    let trust_loopback_forwarded_ip = start_forwarded_ip_trust_refresh(
-        config_service.clone(),
-        proxy_config.trust_loopback_forwarded_ip,
-    )?;
+    let trust_loopback_forwarded_ip = start_forwarded_ip_trust_refresh(config_service.clone())?;
     let lb = LoadBalancer::new(
         upstream_resolver,
         proxy_log_handle,
@@ -916,7 +895,7 @@ mod preflight_bind_tests {
             Arc::new(db),
         ));
 
-        let snapshot = start_forwarded_ip_trust_refresh(service, false)
+        let snapshot = start_forwarded_ip_trust_refresh(service)
             .expect("saved admin opt-in must apply at startup");
         assert!(snapshot.load(Ordering::Relaxed));
     }
@@ -931,7 +910,7 @@ mod preflight_bind_tests {
             Arc::new(db),
         ));
 
-        let error = start_forwarded_ip_trust_refresh(service, false)
+        let error = start_forwarded_ip_trust_refresh(service)
             .expect_err("proxy must not accept traffic before IP policy is known");
         assert!(error
             .to_string()
@@ -940,55 +919,60 @@ mod preflight_bind_tests {
     }
 
     #[test]
-    fn startup_override_does_not_depend_on_settings_read() {
+    fn failed_forwarded_ip_trust_refresh_keeps_last_known_admin_choice() {
+        let snapshot = AtomicBool::new(false);
+
+        assert_eq!(
+            apply_forwarded_ip_trust_refresh(&snapshot, Some(true)),
+            Some(true)
+        );
+        assert_eq!(apply_forwarded_ip_trust_refresh(&snapshot, None), None);
+        assert!(snapshot.load(Ordering::Relaxed));
+
+        assert_eq!(
+            apply_forwarded_ip_trust_refresh(&snapshot, Some(false)),
+            Some(false)
+        );
+        assert!(!snapshot.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn forwarded_ip_trust_refresh_task_stops_once_load_balancer_is_dropped() {
+        // The refresh loop's exit condition is `weak.upgrade()` returning `None`
+        // once every strong `Arc<AtomicBool>` (held by the `LoadBalancer`) is
+        // dropped. Exercising the real spawned task would require sleeping past
+        // `FORWARDED_IP_TRUST_REFRESH_INTERVAL` in a test; asserting the upgrade
+        // behavior directly proves the precondition the loop relies on to end,
+        // without a real-time wait.
+        let settings = AppSettings {
+            trust_loopback_forwarded_ip: Some(false),
+            ..AppSettings::default()
+        };
+        let row = settings::Model {
+            id: 1,
+            data: settings.to_json(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
         let db = MockDatabase::new(DatabaseBackend::Postgres)
-            .append_query_errors([DbErr::Custom("settings unavailable".to_string())])
+            .append_query_results([[row]])
             .into_connection();
         let service = Arc::new(temps_config::ConfigService::new(
             test_config(),
             Arc::new(db),
         ));
 
-        let snapshot = start_forwarded_ip_trust_refresh(service, true)
-            .expect("explicit override determines policy without a settings read");
-        assert!(snapshot.load(Ordering::Relaxed));
-    }
+        let snapshot =
+            start_forwarded_ip_trust_refresh(service).expect("initial settings load succeeds");
+        let weak = Arc::downgrade(&snapshot);
+        assert!(weak.upgrade().is_some(), "still held by this test's Arc");
 
-    #[test]
-    fn forwarded_ip_trust_combines_admin_setting_and_startup_override() {
-        assert!(!effective_forwarded_ip_trust(false, false));
-        assert!(effective_forwarded_ip_trust(false, true));
-        assert!(effective_forwarded_ip_trust(true, false));
-        assert!(effective_forwarded_ip_trust(true, true));
-    }
-
-    #[test]
-    fn failed_forwarded_ip_trust_refresh_keeps_last_known_admin_choice() {
-        let snapshot = AtomicBool::new(false);
-
-        assert_eq!(
-            apply_forwarded_ip_trust_refresh(&snapshot, false, Some(true)),
-            Some(true)
+        drop(snapshot);
+        assert!(
+            weak.upgrade().is_none(),
+            "once the LoadBalancer's Arc is dropped, the next loop iteration's \
+             weak upgrade must fail so the background task exits"
         );
-        assert_eq!(
-            apply_forwarded_ip_trust_refresh(&snapshot, false, None),
-            None
-        );
-        assert!(snapshot.load(Ordering::Relaxed));
-
-        assert_eq!(
-            apply_forwarded_ip_trust_refresh(&snapshot, false, Some(false)),
-            Some(false)
-        );
-        assert!(!snapshot.load(Ordering::Relaxed));
-
-        let forced = AtomicBool::new(true);
-        assert_eq!(apply_forwarded_ip_trust_refresh(&forced, true, None), None);
-        assert_eq!(
-            apply_forwarded_ip_trust_refresh(&forced, true, Some(false)),
-            None
-        );
-        assert!(forced.load(Ordering::Relaxed));
     }
 
     #[test]

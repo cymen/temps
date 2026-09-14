@@ -118,11 +118,6 @@ pub struct ServeCommand {
     #[arg(long, env = "TEMPS_DISABLE_HTTPS_REDIRECT")]
     pub disable_https_redirect: bool,
 
-    /// Trust X-Forwarded-For or X-Real-IP from a same-host reverse proxy.
-    /// Enable only when that proxy overwrites or safely appends the client IP.
-    #[arg(long, env = "TEMPS_TRUST_LOOPBACK_FORWARDED_IP")]
-    pub trust_loopback_forwarded_ip: bool,
-
     /// Private/WireGuard IP address of this control plane node.
     /// Worker nodes use this address to reach services (databases, etc.) on the control plane.
     #[arg(long, env = "TEMPS_PRIVATE_ADDRESS")]
@@ -877,7 +872,6 @@ impl ServeCommand {
             route_table,
             serve_config.clone(),
             self.disable_https_redirect,
-            self.trust_loopback_forwarded_ip,
             on_demand_manager,
             Some(admin_gate_handle),
             retention_resolver_slot as Arc<dyn temps_core::RetentionResolver>,
@@ -889,35 +883,6 @@ impl ServeCommand {
 #[cfg(test)]
 mod post_migration_tests {
     use super::*;
-    use clap::{CommandFactory, Parser};
-
-    #[derive(Parser)]
-    struct TestServeArgs {
-        #[command(flatten)]
-        command: ServeCommand,
-    }
-
-    #[test]
-    fn forwarded_ip_trust_accepts_flag_and_env_binding() {
-        let enabled = TestServeArgs::try_parse_from([
-            "temps",
-            "--database-url",
-            "postgres://localhost/temps",
-            "--trust-loopback-forwarded-ip",
-        ])
-        .unwrap();
-        assert!(enabled.command.trust_loopback_forwarded_ip);
-
-        let command = TestServeArgs::command();
-        let argument = command
-            .get_arguments()
-            .find(|arg| arg.get_long() == Some("trust-loopback-forwarded-ip"))
-            .unwrap();
-        assert_eq!(
-            argument.get_env().and_then(|name| name.to_str()),
-            Some("TEMPS_TRUST_LOOPBACK_FORWARDED_IP")
-        );
-    }
 
     #[test]
     fn index_retry_backoff_grows_and_caps() {
