@@ -167,6 +167,39 @@ impl AuditOperation for CloudTelemetryBulkGuardUpdatedAudit {
     }
 }
 
+/// `FORWARDED_IP_TRUST_UPDATED` — a change to whether Temps trusts
+/// `X-Forwarded-For`/`X-Real-IP` from a loopback reverse proxy.
+///
+/// A separate event from `SETTINGS_UPDATED`, for the same reason as the bulk
+/// activation guard above: this toggle decides which IP address feeds
+/// analytics, proxy logs, and IP-based access-control decisions, so it must
+/// be distinguishable in the audit trail from an unrelated settings save.
+#[derive(Debug, Clone, serde::Serialize)]
+struct ForwardedIpTrustUpdatedAudit {
+    context: AuditContext,
+    previous_enabled: bool,
+    new_enabled: bool,
+}
+
+impl AuditOperation for ForwardedIpTrustUpdatedAudit {
+    fn operation_type(&self) -> String {
+        "FORWARDED_IP_TRUST_UPDATED".to_string()
+    }
+    fn user_id(&self) -> Option<i32> {
+        Some(self.context.user_id)
+    }
+    fn ip_address(&self) -> Option<String> {
+        self.context.ip_address.clone()
+    }
+    fn user_agent(&self) -> &str {
+        &self.context.user_agent
+    }
+    fn serialize(&self) -> anyhow::Result<String> {
+        serde_json::to_string(self)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize audit operation {}", e))
+    }
+}
+
 /// Audit record for a console-triggered platform update. Written before the
 /// process exits, so the trail survives the restart it causes.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -2402,6 +2435,8 @@ async fn update_settings(
     let next_bulk_guards = BulkActivationGuards::from(&settings.cloud);
     authorize_bulk_activation_guard_change(&auth, previous_bulk_guards, next_bulk_guards)?;
 
+    let previous_trust_loopback_forwarded_ip = stored_settings.trust_loopback_forwarded_ip();
+
     // If sensitive fields are masked, preserve the existing values
     if let Some(ref key) = settings.dns_provider.cloudflare_api_key {
         if key == "******" {
@@ -2614,6 +2649,8 @@ async fn update_settings(
 
     normalize_edge_target(&mut settings);
 
+    let next_trust_loopback_forwarded_ip = settings.trust_loopback_forwarded_ip();
+
     match app_state.config_service.update_settings(settings).await {
         Ok(_) => {
             let audit = SettingsUpdatedAudit {
@@ -2658,6 +2695,33 @@ async fn update_settings(
                 if let Err(e) = app_state.audit_service.create_audit_log(&guard_audit).await {
                     error!(
                         "Failed to create the Temps Cloud bulk activation guard audit log: {}",
+                        e
+                    );
+                }
+            }
+
+            if next_trust_loopback_forwarded_ip != previous_trust_loopback_forwarded_ip {
+                info!(
+                    previous_enabled = previous_trust_loopback_forwarded_ip,
+                    new_enabled = next_trust_loopback_forwarded_ip,
+                    "Loopback forwarded-IP trust setting changed"
+                );
+                let forwarded_ip_trust_audit = ForwardedIpTrustUpdatedAudit {
+                    context: AuditContext {
+                        user_id: auth.user_id(),
+                        ip_address: Some(metadata.ip_address.clone()),
+                        user_agent: metadata.user_agent.clone(),
+                    },
+                    previous_enabled: previous_trust_loopback_forwarded_ip,
+                    new_enabled: next_trust_loopback_forwarded_ip,
+                };
+                if let Err(e) = app_state
+                    .audit_service
+                    .create_audit_log(&forwarded_ip_trust_audit)
+                    .await
+                {
+                    error!(
+                        "Failed to create the loopback forwarded-IP trust audit log: {}",
                         e
                     );
                 }
